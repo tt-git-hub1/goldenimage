@@ -6,4 +6,11 @@ aws ec2 describe-images \
 --output text
 ami-0482bfccb0592593d
 
+#
+田中のAWSアカウント内（カサレアルAWS）ですべて完結
+AL2023 + deepsecurityのインストールを試す → AMIが自己所有（プライベート）までできる
+※自己所有トレンドマイクロが無償版であれば
 
+■ゴール
+goldenimageを使ったEC2の起動 → deepesecurityが動作する（サーバーと通信ができるとこまで）
+↑がうまく行けばテクマトリックスのセキュリティ製品を使用したgoldenimageを作成
