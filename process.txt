@@ -1,16 +1,25 @@
+##########################################
+# 実現したいこと
+##########################################
+田中のAWSアカウント内（カサレアルAWS）ですべて完結
+AL2023 + deepsecurityのインストールを試す → AMIが自己所有（プライベート）できる
+※自己所有トレンドマイクロが無償版であれば
+うまく行けばテクマトリックスのセキュリティ製品を使用したgoldenimageを作成
+
+##########################################
+# ゴール
+##########################################
+goldenimageを使ったEC2の起動 → deepesecurityが動作する（サーバーと通信ができるとこまで）
+
+##########################################
+# 作業手順
+##########################################
+
 # 東京リージョン（ap-northeast-1）の最新 Amazon Linux 2023（x86_64）AMI 
 aws ec2 describe-images \
---owners amazon \
---filters "Name=name,Values=al2023-ami-*-x86_64" "Name=architecture,Values=x86_64" \
---query 'Images | sort_by(@, &CreationDate)[-1].ImageId' \
---output text
+  --owners amazon \
+  --filters "Name=name,Values=al2023-ami-*-x86_64" "Name=architecture,Values=x86_64" \
+  --query 'Images | sort_by(@, &CreationDate)[-1].ImageId' \
+  --output text
 ami-0482bfccb0592593d
 
-#
-田中のAWSアカウント内（カサレアルAWS）ですべて完結
-AL2023 + deepsecurityのインストールを試す → AMIが自己所有（プライベート）までできる
-※自己所有トレンドマイクロが無償版であれば
-
-■ゴール
-goldenimageを使ったEC2の起動 → deepesecurityが動作する（サーバーと通信ができるとこまで）
-↑がうまく行けばテクマトリックスのセキュリティ製品を使用したgoldenimageを作成
