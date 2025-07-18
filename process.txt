@@ -7,12 +7,31 @@ AL2023 + deepsecurityのインストールを試す → AMIが自己所有（プ
 うまく行けばテクマトリックスのセキュリティ製品を使用したgoldenimageを作成
 
 ##########################################
+# エラー
+##########################################
+install.log の内容から Deep Security Agent のインストール自体は成功しているが、
+サービス ds_agent.service が systemd に認識されておらず、エージェントが起動できていない状態
+
+ds_agent.service が存在しない
+Unit ds_agent.service could not be found.
+このエラーが繰り返し出ており、systemctl で起動できるサービスが存在しない
+
+EC2 起動時の User Data で使う分には成功するが、ゴールデンイメージ（AMI）を作成して起動したインスタンスでは失敗する
+↓
+①	UserData は再実行されない（EC2 起動後の初回インスタンスのみ）
+②	/opt/TrendMicro や /tmp/.dsa-deploy、ログファイルなどが AMI に残っているため、再インストールに失敗
+③	/opt/ds_agent/sendCommand など一部コマンドが エージェント起動前に存在しない
+④	AWS の cloud-init が再初期化されていないため、UserData スクリプトが実行されない
+
+AMI 作成前に上記クリーンアップスクリプトを必ず実行する
+
+##########################################
 # ゴール
 ##########################################
 goldenimageを使ったEC2の起動 → deepesecurityが動作する（サーバーと通信ができるとこまで）
 
 ##########################################
-# 作業手順
+# ゴールデンイメージ aws cli作成
 ##########################################
 
 # 東京リージョン（ap-northeast-1）の最新 Amazon Linux 2023（x86_64）AMI 
@@ -22,4 +41,177 @@ aws ec2 describe-images \
   --query 'Images | sort_by(@, &CreationDate)[-1].ImageId' \
   --output text
 ami-0482bfccb0592593d
+
+# 配信スクリプトをdeploy_v1es.sh名で作成し、s3バケットに格納する
+aws s3 cp deploy_v1es.sh s3://deepsecurity-test/scripts/deploy_v1es.sh
+aws s3 cp agent.rpm s3://deepsecurity-test/scripts/agent.rpm
+
+#=========================================
+# EC2を起動するためのUserdataを作成
+#=========================================
+cat << 'EOF' > userdata.sh
+#!/bin/bash
+set -eux
+
+# ログディレクトリ作成
+mkdir -p /var/log/v1es
+exec > >(tee -a /var/log/v1es/install.log) 2>&1
+
+# スクリプトを S3 から取得（あなたのバケットとパスに応じて変更）
+aws s3 cp s3://deepsecurity-test/scripts/deploy_v1es.sh /tmp/deploy_v1es.sh
+chmod +x /tmp/deploy_v1es.sh
+
+# インストールスクリプトの実行
+/tmp/deploy_v1es.sh
+EOF
+
+# 自動起動の有効化と起動
+systemctl enable ds_agent
+systemctl start ds_agent
+systemctl status ds_agent
+
+#=========================================
+# EC2 インスタンス起動
+#=========================================
+INSTANCE_ID=$(aws ec2 run-instances \
+  --image-id ami-0482bfccb0592593d \
+  --instance-type t3.medium \
+  --iam-instance-profile Name=ec2-golden-role \
+  --key-name deepsecurity-tanaka \
+  --user-data fileb://userdata.sh \
+  --security-group-ids deepsecurity-tanaka \
+  --block-device-mappings '[{"DeviceName":"/dev/xvda","Ebs":{"VolumeSize":20,"VolumeType":"gp3","DeleteOnTermination":true}}]' \
+  --tag-specifications 'ResourceType=instance,Tags=[{Key=Name,Value=deepsecurity-golden}]' \
+  --query 'Instances[0].InstanceId' \
+  --output text)
+
+#=========================================
+# 起動を待つ
+#=========================================
+aws ec2 wait instance-status-ok --instance-ids $INSTANCE_ID
+
+#=========================================
+# Golden AMI を作成
+#=========================================
+GOLDEN_IMAGE_ID=$(aws ec2 create-image \
+  --instance-id $INSTANCE_ID \
+  --name "al2023-deepsecurity-golden-$(date +%Y%m%d-%H%M)" \
+  --description "AL2023 with VisionOne Agent pre-installed" \
+  --no-reboot \
+  --query 'ImageId' \
+  --output text)
+
+#=========================================
+# 元のインスタンスを削除
+#=========================================
+aws ec2 terminate-instances --instance-ids $INSTANCE_ID
+
+#=========================================
+# この AMI を使って EC2 インスタンスを起動
+#=========================================
+aws ec2 run-instances \
+  --image-id $GOLDEN_IMAGE_ID \
+  --instance-type t3.medium \
+  --key-name deepsecurity-tanaka \
+  --security-group-ids deepsecurity-tanaka \
+  --iam-instance-profile Name=ec2-golden-role \
+  --tag-specifications 'ResourceType=instance,Tags=[{Key=Name,Value=from-golden-ami}]' \
+  --output table
+
+
+ssh -i deepsecurity-tanaka.pem ec2-user@54.238.103.196
+
+
+# オプション：起動時にアクティベーションしたい場合
+Golden AMI は “登録だけしない” 状態にし、実運用インスタンスでは UserData で登録だけ実行させる
+#!/bin/bash
+/opt/ds_agent/dsa_control -a dsm://agents.deepsecurity.trendmicro.com:443/ \
+  "tenantID:<your-tenant-id>" \
+  "token:<activation-token>"
+
+##########################################
+# EC2 Image Builder
+##########################################
+
+#=========================================
+#  コンポーネント（インストール処理を行うスクリプト）
+#=========================================
+cat << 'EOF' > deepsecurity-component.yml
+name: install-deepsecurity
+description: Install Deep Security Vision One Agent
+schemaVersion: 1.0
+phases:
+  - name: build
+    steps:
+      - name: InstallAgent
+        action: ExecuteBash
+        inputs:
+          commands:
+            - mkdir -p /var/log/v1es
+            - exec > >(tee -a /var/log/v1es/install.log) 2>&1
+            - aws s3 cp s3://deepsecurity-test/scripts/deploy_v1es.sh /tmp/deploy_v1es.sh
+            - chmod +x /tmp/deploy_v1es.sh
+            - /tmp/deploy_v1es.sh
+EOF
+
+#=========================================
+# Image Builderコンポーネントとして登録
+#=========================================
+aws imagebuilder create-component \
+  --name deepsecurity-install \
+  --semantic-version 1.0.0 \
+  --platform Linux \
+  --data file://deepsecurity-component.yml \
+  --description "Install Deep Security Vision One Agent"
+
+#=========================================
+# Amazon Linux 2023 の最新AMIをベースに、上記コンポーネントを組み込み
+#=========================================
+BASE_AMI=$(aws ec2 describe-images \
+  --owners amazon \
+  --filters "Name=name,Values=al2023-ami-*-x86_64" "Name=architecture,Values=x86_64" \
+  --query 'Images | sort_by(@, &CreationDate)[-1].ImageId' \
+  --output text)
+
+#=========================================
+# イメージレシピ作成
+#=========================================
+aws imagebuilder create-image-recipe \
+  --name al2023-deepsecurity-recipe \
+  --semantic-version 1.0.0 \
+  --components '[{"componentArn":"arn:aws:imagebuilder:ap-northeast-1:405501939914:component/deepsecurity-install/1.0.0/1"}]' \
+  --parent-image $BASE_AMI \
+  --block-device-mappings '[{"deviceName":"/dev/xvda","ebs":{"volumeSize":30,"volumeType":"gp3"}}]' \
+  --description "Amazon Linux 2023 with Deep Security Agent"
+
+#=========================================
+# インフラストラクチャ設定
+#=========================================
+aws imagebuilder create-infrastructure-configuration \
+  --name al2023-deepsecurity-infra \
+  --instance-types t3.medium \
+  --security-group-ids sg-0b8a440882aa6920f \
+  --key-pair deepsecurity-tanaka \
+  --instance-profile-name ec2-golden-role \
+  --terminate-instance-on-failure
+
+#=========================================
+#  イメージビルダーのイメージ作成設定（パイプラインの作成）
+#=========================================
+aws imagebuilder create-image-pipeline \
+  --name al2023-deepsecurity-pipeline \
+  --image-recipe-arn arn:aws:imagebuilder:ap-northeast-1:405501939914:image-recipe/al2023-deepsecurity-recipe/1.0.0 \
+  --infrastructure-configuration-arn arn:aws:imagebuilder:ap-northeast-1:405501939914:infrastructure-configuration/al2023-deepsecurity-infra \
+  --description "Pipeline to build AL2023 + DeepSecurity Golden Image"
+
+#=========================================
+# パイプラインの実行コマンド 作成したイメージパイプラインを手動で起動す
+#=========================================
+aws imagebuilder start-image-pipeline-execution \
+  --image-pipeline-arn arn:aws:imagebuilder:ap-northeast-1:405501939914:image-pipeline/al2023-deepsecurity-pipeline
+
+
+#=========================================
+# 削除
+#=========================================
 

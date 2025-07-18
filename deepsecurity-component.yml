@@ -1,0 +1,15 @@
+name: install-deepsecurity
+description: Install Deep Security Vision One Agent
+schemaVersion: 1.0
+phases:
+  - name: build
+    steps:
+      - name: InstallAgent
+        action: ExecuteBash
+        inputs:
+          commands:
+            - mkdir -p /var/log/v1es
+            - exec > >(tee -a /var/log/v1es/install.log) 2>&1
+            - aws s3 cp s3://deepsecurity-test/scripts/deploy_v1es.sh /tmp/deploy_v1es.sh
+            - chmod +x /tmp/deploy_v1es.sh
+            - /tmp/deploy_v1es.sh
