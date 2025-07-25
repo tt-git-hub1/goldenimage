@@ -50,6 +50,7 @@ ami-0482bfccb0592593d
 # 配信スクリプトをdeploy_v1es.sh名で作成し、s3バケットに格納する
 aws s3 cp deploy_v1es.sh s3://deepsecurity-test/scripts/deploy_v1es.sh
 aws s3 cp agent.rpm s3://deepsecurity-test/scripts/agent.rpm
+aws s3 cp agent.rpm s3://deepsecurity-test/packages/agent.rpm
 
 #=========================================
 # EC2を起動するためのUserdataを作成
@@ -124,7 +125,11 @@ aws ec2 run-instances \
   --output table
 
 
-ssh -i deepsecurity-tanaka.pem ec2-user@3.112.59.165
+ssh -i /c/Users/tanaka/goldenimage/deepsecurity-tanaka.pem ec2-user@57.183.19.211
+
+scp -i /c/Users/tanaka/goldenimage/deepsecurity-tanaka.pem TMServerAgent_Amazon_Linux_2023_x86_64_deepsecurity_tanaka.tar ec2-user@35.78.221.168:/home/ec2-user
+
+scp ec2-user@35.78.221.168:/home/ec2-user/packages/30dbad46-b227-45bd-a758-e620b01c69b0/agent.rpm /c/Users/tanaka/goldenimage/
 
 
 # オプション：起動時にアクティベーションしたい場合
@@ -143,6 +148,57 @@ runcmd:
   - chmod +x /tmp/deploy_v1es.sh
   - echo "[INFO] Executing install script..."
   - /tmp/deploy_v1es.sh
+
+
+
+#cloud-config
+write_files:
+  - path: /tmp/setup-dsa.sh
+    permissions: '0755'
+    content: |
+      #!/bin/bash
+      exec > >(tee -a /var/log/dsa-activation.log) 2>&1
+      echo "[INFO] Starting Deep Security Agent activation..."
+
+      SETPOLICY=10
+      SETDIR=/opt/ds_agent/
+      SETURL="dsa_control -a dsm://agents.workload.jp-1.cloudone.trendmicro.com:443/ tenantID:59BF1FDF-93C7-286F-0B66-2972F15A5096 token:25EA1FE4-1DD1-6ABE-50E3-5CADCA52D5C2"
+
+      SBID="S22067B001_management"
+      GID_A=2265
+      GID_B=2266
+      RLYID=3
+
+      DSNAME=$(hostname)
+      DISPLAY="${SBID}_${DSNAME}"
+      ACTIVATIONURL="${SETDIR}${SETURL}"
+      SETGROUPID=${GID_A}
+
+      echo "ACTIVATIONURL=${ACTIVATIONURL}"
+      echo "SETPOLICY=${SETPOLICY}"
+      echo "RLYID=${RLYID}"
+      echo "SETGROUPID=${SETGROUPID}"
+      echo "DISPLAY=${DISPLAY}"
+
+      rm -rf /tmp/ignore_agent_installer_check
+      rm -rf /etc/use_dsa_with_iptables
+
+      echo "[INFO] Resetting DSA..."
+      ${SETDIR}dsa_control -r
+      sleep 5
+
+      echo "[INFO] Activating DSA..."
+      touch /tmp/ignore_agent_installer_check
+
+      eval ${ACTIVATIONURL} "policyid:${SETPOLICY}" "relaygroupid:${RLYID}" "groupid:${SETGROUPID}" "hostname:${DISPLAY}"
+
+      touch /etc/use_dsa_with_iptables
+
+      echo "[INFO] DSA activation complete."
+      sleep 5
+
+runcmd:
+  - bash /tmp/setup-dsa.sh
 
 
 
@@ -165,36 +221,22 @@ phases:
         action: ExecuteBash
         inputs:
           commands:
+            - echo "[INFO] Creating log directory..."
             - mkdir -p /var/log/v1es
-            - exec > >(tee -a /var/log/v1es/install.log) 2>&1
-            - aws s3 cp s3://deepsecurity-test/scripts/deploy_v1es.sh /tmp/deploy_v1es.sh
-            # - chmod +x /tmp/deploy_v1es.sh
-            # - /tmp/deploy_v1es.sh
-EOF
-
-cat << 'EOF' > deepsecurity-component.yml
-name: install-deepsecurity
-description: Install Deep Security Vision One Agent
-schemaVersion: 1.0
-phases:
-  - name: build
-    steps:
-      - name: InstallAgent
-        action: ExecuteBash
-        inputs:
-          commands:
-            - mkdir -p /var/log/v1es
+            - echo "[INFO] Redirecting output to log file..."
             - exec > >(tee -a /var/log/v1es/install.log) 2>&1
             - echo "[INFO] Installing dependency for Amazon Linux 2023..."
             - dnf install -y libxcrypt-compat
-            - echo "[INFO] Downloading Deep Security Agent..."
-            - cd /tmp
-            - curl -O https://app.deepsecurity.trendmicro.com/software/agent/amzn2/x86_64/agent.rpm
-            - echo "[INFO] Installing agent..."
-            - rpm -ihv agent.rpm
-            - echo "[INFO] Installation complete."
+            - echo "[INFO] Downloading Deep Security Agent from S3..."
+            - aws s3 cp s3://deepsecurity-test/packages/agent.rpm /tmp/agent.rpm
+            - echo "[INFO] Changing permissions of the agent package..."
+            - chmod 744 /tmp/agent.rpm
+            - echo "[INFO] Installing Deep Security Agent..."
+            - rpm -ihv /tmp/agent.rpm
+            - echo "[INFO] Checking agent status..."
+            - systemctl status ds_agent || echo "[WARN] ds_agent service not available yet"
+            - echo "[INFO] Installation script completed."
 EOF
-
 
 cat << 'EOF' > deepsecurity-component.yml
 name: install-deepsecurity
@@ -390,7 +432,7 @@ phases:
                   PROPERTY=$(eval echo '{\"xbc_env\": \"$XBC_ENV\", \"xbc_agent_token\": "\"bc5bde8d-6785-4f4b-b374-b9b58f0a227e|8dbf5a3e-1301-4a5d-9500-ebc9a92576ed\"", \"full_package\": true}')
               elif [[ ${archType} == "aarch64" ]]; then
                   PROPERTY=$(eval echo '{\"xbc_env\": \"$XBC_ENV\", \"xbc_agent_token\": "\"c356ed4c-742b-4841-a390-a92eb953530f|ff6fd948-bc7f-4ec4-add1-905b2cf4e2de\"", \"full_package\": true}')
-              fi
+              /
               echo $PROPERTY > $EXTRATED_DIR/.property
 
               echo "[INFO] Start agent installation"
@@ -482,6 +524,34 @@ phases:
             - /opt/scripts/agent-install.sh
 EOF
 
+cat << 'EOF' > deepsecurity-component.yml
+name: install-deepsecurity
+description: Install Deep Security Vision One Agent
+schemaVersion: 1.0
+phases:
+  - name: build
+    steps:
+      - name: InstallAgent
+        action: ExecuteBash
+        inputs:
+          commands:
+            - echo "[INFO] Creating log directory..."
+            - mkdir -p /var/log/v1es
+            - echo "[INFO] Redirecting output to log file..."
+            - exec > >(tee -a /var/log/v1es/install.log) 2>&1
+            - echo "[INFO] Installing dependency for Amazon Linux 2023..."
+            - dnf install -y libxcrypt-compat
+            - echo "[INFO] Downloading Deep Security Agent from S3..."
+            - aws s3 cp s3://deepsecurity-test/packages/agent.rpm /tmp/agent.rpm
+            - echo "[INFO] Changing permissions of the agent package..."
+            - chmod 744 /tmp/agent.rpm
+            - echo "[INFO] Installing Deep Security Agent..."
+            - rpm -ihv /tmp/agent.rpm
+            - echo "[INFO] Checking agent status..."
+            - systemctl status ds_agent || echo "[WARN] ds_agent service not available yet"
+            - echo "[INFO] Installation script completed."
+EOF
+
 
 #=========================================
 # Image Builderコンポーネントとして登録
@@ -567,4 +637,5 @@ aws imagebuilder list-images \
 
 aws imagebuilder delete-image \
   --image-build-version-arn arn:aws:imagebuilder:ap-northeast-1:405501939914:image/al2023-deepsecurity-recipe/1.0.0/1
+
 
